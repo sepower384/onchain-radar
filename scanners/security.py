@@ -83,7 +83,8 @@ async def resolve_contract(c: Candidate, coingecko, dexscreener, cfg) -> None:
         c.stage("security").detail.setdefault("rejected", []).append(f"{ch}: {why}")
 
 
-async def run(cands: list[Candidate], goplus, coingecko, dexscreener, cfg, *, top: int = 25) -> None:
+async def run(cands: list[Candidate], goplus, coingecko, dexscreener, cfg, *, top: int = 25,
+              store=None) -> None:
     sem = asyncio.Semaphore(4)
 
     async def one(c: Candidate):
@@ -92,6 +93,8 @@ async def run(cands: list[Candidate], goplus, coingecko, dexscreener, cfg, *, to
                 await resolve_contract(c, coingecko, dexscreener, cfg)
                 if c.chain and c.address:
                     c.security = await goplus.security(c.chain, c.address)
+                    if store is not None:
+                        store.upsert_contract(c.coin_key, c.symbol, c.chain, c.address)
                 s, line = score_security(c.security)
                 st = c.stage("security")
                 st.score, st.line = s, line

@@ -150,6 +150,45 @@ class Provider:
         log.warning("%s 실패: %s (%s)", self.name, self.last_error, url)
         return None
 
+    async def post_json(self, path: str, body: dict, *, ttl: float = 0, headers: dict | None = None,
+                        cache_key: str | None = None) -> Any:
+        """POST 판 get_json — 같은 규칙(레이트리밋·캐시·재시도·예외 격리)."""
+        if not self.enabled:
+            return None
+        import json as _json
+        url = path if path.startswith("http") else f"{self.base_url}{path}"
+        ck = cache_key or f"POST {url} {_json.dumps(body, sort_keys=True)}"
+        cached = self.cache.get(ck)
+        if cached is not None:
+            self.stats["cache"] += 1
+            return cached
+        client = await self._client()
+        h = {**self.default_headers, "Content-Type": "application/json", **(headers or {})}
+        for attempt in range(1, self.retries + 1):
+            await self.limiter.wait()
+            try:
+                r = await client.post(url, json=body, headers=h)
+            except (httpx.TimeoutException, httpx.TransportError) as e:
+                self.last_error = type(e).__name__
+                await self._sleep(attempt)
+                continue
+            if r.status_code == 200:
+                try:
+                    data = r.json()
+                except ValueError:
+                    self.last_error = "JSON 아님"
+                    break
+                self.cache.put(ck, data, ttl)
+                self.stats["ok"] += 1
+                return data
+            self.last_error = f"HTTP {r.status_code}"
+            if r.status_code in NO_RETRY:
+                break
+            await self._sleep(attempt)
+        self.stats["fail"] += 1
+        log.warning("%s POST 실패: %s (%s)", self.name, self.last_error, url)
+        return None
+
     async def _sleep(self, attempt: int) -> None:
         await asyncio.sleep(self.backoff * (2 ** (attempt - 1)) + random.uniform(0, 0.4))
 

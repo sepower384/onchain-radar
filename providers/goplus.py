@@ -10,6 +10,7 @@
 """
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 
 from .base import Provider, fnum
@@ -171,11 +172,14 @@ class GoPlus(Provider):
     def _ttl(self) -> float:
         return float(self.s.get("providers.cache_ttl_sec.goplus", 21600))
 
-    async def security(self, chain: str, address: str) -> Security | None:
-        """모르는 체인이면 None(= 안전 신호 없음). 알면 Security."""
+    async def security(self, chain: str, address: str, fresh: bool = False) -> Security | None:
+        """모르는 체인이면 None(= 안전 신호 없음). 알면 Security.
+        fresh=True 는 홀더 적재용 — 6시간 캐시를 쓰면 3시간 간격 스냅샷이 같은 값이 된다."""
+        ttl = 0 if fresh else self._ttl()
         if chain == "solana":
             js = await self.get_json("/api/v1/solana/token_security",
-                                     {"contract_addresses": address}, ttl=self._ttl())
+                                     {"contract_addresses": address}, ttl=ttl,
+                                     cache_key=None if not fresh else f"fresh:{address}:{time.time()}")
             res = ((js or {}).get("result") or {})
             r = res.get(address) or next(iter(res.values()), None) if res else None
             return parse_solana(address, r) if r else None
@@ -183,7 +187,8 @@ class GoPlus(Provider):
         if not cid:
             return None
         js = await self.get_json(f"/api/v1/token_security/{cid}",
-                                 {"contract_addresses": address}, ttl=self._ttl())
+                                 {"contract_addresses": address}, ttl=ttl,
+                                 cache_key=None if not fresh else f"fresh:{address}:{time.time()}")
         if not js or js.get("code") != 1:
             return None
         r = (js.get("result") or {}).get(address.lower())

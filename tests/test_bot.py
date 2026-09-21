@@ -40,10 +40,11 @@ def test_봇이_모든_명령어와_스케줄을_갖고_조립된다():
     app = T.build_app(S(CFG, {"TELEGRAM_BOT_TOKEN": "123456:TEST"}))
     cmds = {c for h in app.handlers[0] for c in getattr(h, "commands", ())}
     need = {"scan", "micro", "dip", "coin", "buy", "unlock", "revenue", "news", "watch",
-            "unwatch", "watchlist", "stats", "settings", "start"}
+            "unwatch", "watchlist", "stats", "settings", "start", "tune"}
     assert need <= cmds
     jobs = {j.name for j in app.job_queue.jobs()}
-    assert {"briefing 08:00", "briefing 20:00", "main", "micro", "dip", "track"} <= jobs
+    assert {"briefing 08:00", "briefing 20:00", "main", "micro", "dip", "track",
+            "news", "holders", "unlock", "tune"} <= jobs
 
 
 def test_토큰이_없으면_시작하지_않는다():

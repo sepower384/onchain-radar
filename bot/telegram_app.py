@@ -53,6 +53,7 @@ HELP = """🛰 <b>ONCHAIN RADAR</b>
 /news — 24h 실질 호재
 /watch · /unwatch &lt;티커&gt; · /watchlist
 /stats — 신호 성과
+/tune — 성과 기반 가중치 튜닝 제안 (apply · reset)
 /settings — 알림 켜기/끄기"""
 
 
@@ -260,21 +261,45 @@ async def cmd_revenue(update, ctx, radar: Radar):
 
 @allowed
 async def cmd_unlock(update, ctx, radar: Radar):
-    if not radar.s.has("TOKENOMIST_API_KEY"):
+    if not radar.P.tokenomist.enabled:
         await update.effective_message.reply_text(
-            "🔒 언락 캘린더는 Tokenomist 키가 있어야 켜집니다.\n"
-            "(DefiLlama 무료 언락 API 는 유료 전환되어 HTTP 402 를 줍니다 — 2026-09-21 확인)")
+            "🔒 언락 캘린더는 Tokenomist 키가 있어야 켜집니다(.env 의 TOKENOMIST_API_KEY).\n"
+            "DefiLlama 무료 언락 API 는 유료 전환되어 HTTP 402 를 줍니다 — 2026-09-21 확인")
         return
-    await update.effective_message.reply_text("언락 스캐너는 Phase 2 에서 연결됩니다.")
+    from scanners.stage4_unlock import calendar_text
+    rows = await radar.P.tokenomist.upcoming(int(radar.s.get("stage4.lookahead_days", 14)),
+                                             min_pct=float(radar.s.get("stage4.big_unlock_pct", 2.0)) / 2)
+    await update.effective_message.reply_text(
+        header("14일 언락 캘린더", "유통량 대비 비중 · 수령 주체") + "\n\n" + calendar_text(rows),
+        parse_mode=ParseMode.HTML)
+
+
+def news_text(radar: Radar, hours: int = 24) -> str:
+    since = time.time() - hours * 3600
+    good = radar.store.news_since(since, ("listing", "real"))
+    bad = radar.store.news_since(since, ("delisting", "warning"))
+    L = [header(f"최근 {hours}h 실질 호재", "거래소 공식 공지(1차 출처) + 분류된 뉴스")]
+    if not good:
+        L.append("\n실질 호재가 없습니다.")
+    for n in good[:15]:
+        mark = "✅" if n.verified else "☑️"
+        link = f' · <a href="{escape(n.url)}">원문</a>' if n.url else ""
+        L.append(f"{mark} <b>{escape(n.symbols)}</b> — {escape(n.why or n.title[:80])}{link}")
+    if bad:
+        L.append("\n<b>⚠️ 리스크 공지</b>")
+        for n in bad[:10]:
+            L.append(f"· <b>{escape(n.symbols)}</b> — {escape(n.why or '')}")
+    if not radar.s.has("ANTHROPIC_API_KEY"):
+        L.append("\n<i>일반 뉴스 분류(Claude)는 꺼져 있습니다 — 거래소 공식 공지만 봅니다.</i>")
+    return "\n".join(L)
 
 
 @allowed
 async def cmd_news(update, ctx, radar: Radar):
-    if not (radar.s.has("ANTHROPIC_API_KEY") and radar.s.get("stage6.enabled")):
-        await update.effective_message.reply_text(
-            "📰 실질 호재 브리핑은 Phase 2 기능입니다(뉴스 수집 + Claude 분류, Anthropic 키 필요).")
-        return
-    await update.effective_message.reply_text("뉴스 스캐너는 Phase 2 에서 연결됩니다.")
+    from scanners import stage6_news
+    await stage6_news.refresh(radar.s, radar.P.feeds, radar.store)
+    await update.effective_message.reply_text(news_text(radar), parse_mode=ParseMode.HTML,
+                                              disable_web_page_preview=True)
 
 
 @allowed
@@ -321,6 +346,21 @@ async def cmd_stats(update, ctx, radar: Radar):
              tracker.stats_text(tracker.stats(radar.store, "micro"), "마이크로캡 성과"),
              tracker.stats_text(tracker.stats(radar.store, "dip"), "되돌림 성과")]
     await update.effective_message.reply_text("\n\n".join(parts), parse_mode=ParseMode.HTML)
+
+
+@allowed
+async def cmd_tune(update, ctx, radar: Radar):
+    from tracking import tuner
+    arg = single.parse_query(update.effective_message.text).lower()
+    if arg == "apply":
+        sug = tuner.apply_suggestion()
+        msg = ("제안된 가중치가 없습니다. /tune 으로 먼저 계산하세요." if not sug else
+               f"✅ 적용했습니다 — {escape(str(sug['weights']))}\n되돌리기: /tune reset")
+    elif arg == "reset":
+        msg = "↩️ config.yaml 기본 가중치로 되돌렸습니다." if tuner.reset() else "덮어쓴 가중치가 없습니다."
+    else:
+        msg = tuner.text(tuner.propose(radar.store, radar.s))
+    await update.effective_message.reply_text(msg, parse_mode=ParseMode.HTML)
 
 
 @allowed
@@ -412,6 +452,79 @@ async def job_dip(ctx: ContextTypes.DEFAULT_TYPE):
                  title="📐 급락 후 되돌림 포착", dip=True, btc_price=res.btc_price)
 
 
+async def job_news(ctx: ContextTypes.DEFAULT_TYPE):
+    """새 거래소 상장·상폐·유의 공지 → 즉시 알림(사양서: 실질 호재 감지 시 실시간 알림)."""
+    from scanners import stage6_news
+    radar: Radar = ctx.application.bot_data["radar"]
+    new = await stage6_news.refresh(radar.s, radar.P.feeds, radar.store)
+    fresh = [n for n in new if time.time() - n["ts"] < 6 * 3600
+             and n["kind"] in ("listing", "real", "delisting", "warning")
+             and (n["kind"] != "listing" or n.get("strength") in ("strong", "medium"))]
+    radar.store.mark_news_alerted([n["id"] for n in new])
+    if not fresh or not radar.prefs()["alerts"]:
+        return
+    bg = await radar.P.bitget.markets() or {}
+    for cid in radar.s.broadcast_chat_ids:
+        for n in fresh[:8]:
+            good = n["kind"] in ("listing", "real")
+            icon = "📰 실질 호재" if good else "⚠️ 리스크 공지"
+            link = f'\n<a href="{escape(n["url"])}">원문 공지</a>' if n.get("url") else ""
+            text = (f"{icon} · <b>{escape(n['symbols'])}</b>\n{escape(n['why'] or '')}\n"
+                    f"{escape(n['title'][:200])}{link}")
+            buttons = []
+            for sym in filter(None, n["symbols"].split(",")):
+                m = bg.get(sym)
+                if good and m and (m.spot_symbol or m.futures_symbol):
+                    ls = radar.lb.build(bitget_spot=m.spot_symbol, bitget_futures=m.futures_symbol)
+                    buttons += [InlineKeyboardButton(f"{sym} {b.text}", url=b.url) for b in ls.buttons]
+            kb = InlineKeyboardMarkup([buttons[i:i + 2] for i in range(0, len(buttons), 2)]) if buttons else None
+            await ctx.bot.send_message(cid, text, parse_mode=ParseMode.HTML, reply_markup=kb,
+                                       disable_web_page_preview=True)
+        await ctx.bot.send_message(cid, DISCLAIMER, parse_mode=ParseMode.HTML)
+
+
+async def job_holders(ctx: ContextTypes.DEFAULT_TYPE):
+    from scanners import holder_job
+    radar: Radar = ctx.application.bot_data["radar"]
+    await holder_job.run(radar.s, radar.P, radar.store)
+
+
+async def job_unlock(ctx: ContextTypes.DEFAULT_TYPE):
+    """매일 09시 — D-7·D-3·D-1 큰 언락 알림."""
+    from providers.tokenomist import recipients_ko
+    from scanners.stage4_unlock import due_alerts
+    radar: Radar = ctx.application.bot_data["radar"]
+    if not radar.P.tokenomist.enabled:
+        return
+    rows = await radar.P.tokenomist.upcoming(8, min_pct=float(radar.s.get("stage4.big_unlock_pct", 2.0)))
+    due = []
+    for u, d in due_alerts(rows, radar.s.get):
+        key = f"unlock:{u['token_id']}:{int(u['ts'])}:{d}"
+        if radar.store.should_send(key, 0, set(), cooldown_h=20, bypass_jump=999):
+            due.append((u, d, key))
+    if not due:
+        return
+    L = [header("⏰ 언락 임박", "유통량 대비 비중이 큰 언락만")]
+    for u, d, key in due[:10]:
+        who = recipients_ko(u.get("recipients") or [], 3)
+        val = f" (${u['value_usd'] / 1e6:,.1f}M)" if u.get("value_usd") else ""
+        L.append(f"· D-{d} <b>{escape(u['symbol'])}</b> 유통량의 {u['pct']:.1f}%{val}"
+                 + (f" · {escape(who)}" if who else ""))
+        radar.store.mark_sent(key, 0, set())
+    for cid in radar.s.broadcast_chat_ids:
+        await ctx.bot.send_message(cid, "\n".join(L) + "\n\n" + DISCLAIMER, parse_mode=ParseMode.HTML)
+
+
+async def job_tune(ctx: ContextTypes.DEFAULT_TYPE):
+    """매주 일요일 21시 — 가중치 튜닝 제안만(자동 적용 안 함)."""
+    from tracking import tuner
+    radar: Radar = ctx.application.bot_data["radar"]
+    res = tuner.propose(radar.store, radar.s)
+    if res.get("ok"):
+        for cid in radar.s.broadcast_chat_ids:
+            await ctx.bot.send_message(cid, tuner.text(res), parse_mode=ParseMode.HTML)
+
+
 async def job_track(ctx: ContextTypes.DEFAULT_TYPE):
     radar: Radar = ctx.application.bot_data["radar"]
     await tracker.run_once(radar.s, radar.store, radar.P)
@@ -435,7 +548,7 @@ def build_app(settings) -> Application:
                      ("dip", cmd_dip), ("coin", cmd_coin), ("buy", cmd_buy), ("revenue", cmd_revenue),
                      ("unlock", cmd_unlock), ("news", cmd_news), ("watch", cmd_watch),
                      ("unwatch", cmd_unwatch), ("watchlist", cmd_watchlist), ("stats", cmd_stats),
-                     ("settings", cmd_settings)):
+                     ("tune", cmd_tune), ("settings", cmd_settings)):
         app.add_handler(CommandHandler(name, fn))
     app.add_handler(CallbackQueryHandler(on_pick, pattern=r"^pick:"))
     app.add_error_handler(on_error)
@@ -449,6 +562,11 @@ def build_app(settings) -> Application:
     jq.run_repeating(job_micro, interval=int(sched("schedule.pool_c_minutes", 5)) * 60, first=120, name="micro")
     jq.run_repeating(job_dip, interval=int(sched("stage8.scan_minutes", 60)) * 60, first=300, name="dip")
     jq.run_repeating(job_track, interval=int(sched("schedule.tracking_minutes", 60)) * 60, first=600, name="track")
+    jq.run_repeating(job_news, interval=int(sched("stage6.scan_minutes", 10)) * 60, first=30, name="news")
+    jq.run_repeating(job_holders, interval=int(sched("schedule.holder_snapshot_minutes", 180)) * 60,
+                     first=900, name="holders")
+    jq.run_daily(job_unlock, time=dt.time(9, 0, tzinfo=KST), name="unlock")
+    jq.run_daily(job_tune, time=dt.time(21, 0, tzinfo=KST), days=(0,), name="tune")   # 일요일
     return app
 
 

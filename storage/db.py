@@ -72,6 +72,18 @@ class HolderSnapshot(Base):
     source: Mapped[str] = mapped_column(String(20), default="goplus")
 
 
+class HolderTop(Base):
+    """상위 홀더 지갑별 잔고 스냅샷 — 고래 순매수·거래소 순유출을 '스냅샷끼리' 비교해 낸다.
+    percent 는 총공급 대비 비율(0~1). 공급량을 몰라도 %p 로 바로 비교할 수 있다."""
+    __tablename__ = "holder_top"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    ts: Mapped[float] = mapped_column(Float, index=True)
+    coin_key: Mapped[str] = mapped_column(String(160), index=True)
+    address: Mapped[str] = mapped_column(String(120))
+    percent: Mapped[float] = mapped_column(Float)
+    kind: Mapped[str] = mapped_column(String(12))       # exchange | contract | burn | wallet
+
+
 class PriceSnapshot(Base):
     __tablename__ = "price_snapshots"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -81,6 +93,17 @@ class PriceSnapshot(Base):
     volume_24h: Mapped[float | None] = mapped_column(Float, nullable=True)
     liquidity_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
     oi_usd: Mapped[float | None] = mapped_column(Float, nullable=True)   # 선물 OI — 24h 변화율용
+
+
+class CoinContract(Base):
+    """한 번이라도 후보에 오른 코인의 (체인, 컨트랙트). 홀더 적재 작업의 대상 목록.
+    후보에 오른 그 순간엔 24h 이력이 없으므로, 잡힌 코인은 따로 계속 스냅샷을 찍어 둔다."""
+    __tablename__ = "coin_contracts"
+    coin_key: Mapped[str] = mapped_column(String(160), primary_key=True)
+    symbol: Mapped[str] = mapped_column(String(40))
+    chain: Mapped[str] = mapped_column(String(30))
+    address: Mapped[str] = mapped_column(String(120))
+    last_seen: Mapped[float] = mapped_column(Float, index=True)
 
 
 class AlertLog(Base):
@@ -99,6 +122,35 @@ class Watch(Base):
     coin_key: Mapped[str] = mapped_column(String(160))
     symbol: Mapped[str] = mapped_column(String(40))
     ts: Mapped[float] = mapped_column(Float)
+
+
+class LlmUsage(Base):
+    """뉴스 분류 호출 기록 — 하루 호출 상한·월 비용 상한을 지키기 위한 장부."""
+    __tablename__ = "llm_usage"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    ts: Mapped[float] = mapped_column(Float, index=True)
+    day: Mapped[str] = mapped_column(String(10), index=True)
+    model: Mapped[str] = mapped_column(String(60))
+    input_tokens: Mapped[int] = mapped_column(Integer)
+    output_tokens: Mapped[int] = mapped_column(Integer)
+    cost_usd: Mapped[float] = mapped_column(Float)
+
+
+class NewsItem(Base):
+    """본 공지·뉴스 — 중복 알림 방지 + /news 목록."""
+    __tablename__ = "news_items"
+    id: Mapped[str] = mapped_column(String(120), primary_key=True)
+    source: Mapped[str] = mapped_column(String(20))
+    ts: Mapped[float] = mapped_column(Float, index=True)
+    title: Mapped[str] = mapped_column(Text)
+    url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    kind: Mapped[str] = mapped_column(String(20))          # listing|delisting|warning|cancel|real|noise|pending
+    strength: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    exchange: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    symbols: Mapped[str] = mapped_column(Text, default="")  # 쉼표
+    why: Mapped[str | None] = mapped_column(Text, nullable=True)
+    verified: Mapped[int] = mapped_column(Integer, default=0)   # 1 = 1차 출처(거래소 공식)·상대방 확인
+    alerted: Mapped[int] = mapped_column(Integer, default=0)
 
 
 class Click(Base):
@@ -162,6 +214,19 @@ class Store:
                                  holder_count=holder_count, top10_pct=top10_pct, source=source))
             s.commit()
 
+    def add_holder_top(self, coin_key: str, rows: list[dict], now: float | None = None):
+        t = time.time() if now is None else now
+        with self.session() as s:
+            s.add_all([HolderTop(ts=t, coin_key=coin_key, address=r["address"], percent=r["percent"],
+                                 kind=r["kind"]) for r in rows])
+            s.commit()
+
+    def holder_top_history(self, coin_key: str, since: float) -> list[HolderTop]:
+        with self.session() as s:
+            return list(s.scalars(select(HolderTop)
+                                  .where(HolderTop.coin_key == coin_key, HolderTop.ts >= since)
+                                  .order_by(HolderTop.ts)))
+
     def holder_history(self, coin_key: str, since: float) -> list[HolderSnapshot]:
         with self.session() as s:
             return list(s.scalars(select(HolderSnapshot)
@@ -193,6 +258,18 @@ class Store:
                                   .where(PriceSnapshot.coin_key == coin_key, PriceSnapshot.ts >= since)
                                   .order_by(PriceSnapshot.ts)))
 
+    def upsert_contract(self, coin_key: str, symbol: str, chain: str | None, address: str | None):
+        if not (chain and address):
+            return
+        with self.session() as s:
+            s.merge(CoinContract(coin_key=coin_key, symbol=symbol, chain=chain, address=address,
+                                 last_seen=time.time()))
+            s.commit()
+
+    def contracts(self, since: float) -> list[CoinContract]:
+        with self.session() as s:
+            return list(s.scalars(select(CoinContract).where(CoinContract.last_seen >= since)))
+
     # ---------------------------------------------------------------- 관심 코인
     def watch(self, chat_id: int, coin_key: str, symbol: str) -> bool:
         with self.session() as s:
@@ -218,6 +295,54 @@ class Store:
             if chat_id is not None:
                 q = q.where(Watch.chat_id == chat_id)
             return list(s.scalars(q.order_by(Watch.ts)))
+
+    # ---------------------------------------------------------------- LLM 장부
+    def log_llm(self, model: str, tin: int, tout: int, cost: float):
+        import datetime as _dt
+        with self.session() as s:
+            s.add(LlmUsage(ts=time.time(), day=_dt.date.today().isoformat(), model=model,
+                           input_tokens=tin, output_tokens=tout, cost_usd=cost))
+            s.commit()
+
+    def llm_calls(self, day) -> int:
+        from sqlalchemy import func
+        with self.session() as s:
+            return s.scalar(select(func.count()).select_from(LlmUsage)
+                            .where(LlmUsage.day == day.isoformat())) or 0
+
+    def llm_cost_month(self, year: int, month: int) -> float:
+        from sqlalchemy import func
+        with self.session() as s:
+            return float(s.scalar(select(func.coalesce(func.sum(LlmUsage.cost_usd), 0.0))
+                                  .where(LlmUsage.day.like(f"{year:04d}-{month:02d}-%"))) or 0.0)
+
+    # ---------------------------------------------------------------- 뉴스
+    def news_seen(self, ids: list[str]) -> set[str]:
+        if not ids:
+            return set()
+        with self.session() as s:
+            return set(s.scalars(select(NewsItem.id).where(NewsItem.id.in_(ids))))
+
+    def add_news(self, rows: list[dict]):
+        with self.session() as s:
+            for r in rows:
+                s.merge(NewsItem(**r))
+            s.commit()
+
+    def news_since(self, since: float, kinds: tuple[str, ...] | None = None) -> list[NewsItem]:
+        with self.session() as s:
+            q = select(NewsItem).where(NewsItem.ts >= since)
+            if kinds:
+                q = q.where(NewsItem.kind.in_(kinds))
+            return list(s.scalars(q.order_by(NewsItem.ts.desc())))
+
+    def mark_news_alerted(self, ids: list[str]):
+        with self.session() as s:
+            for i in ids:
+                n = s.get(NewsItem, i)
+                if n:
+                    n.alerted = 1
+            s.commit()
 
     def log_click(self, chat_id: int, coin_key: str, venue: str):
         with self.session() as s:

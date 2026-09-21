@@ -31,6 +31,7 @@ from providers.dexscreener import pair_summary
 from .model import Candidate
 from .security import score_security
 from .stage1_accumulation import evaluate as eval_accum
+from .stage1_accumulation import snapshot as snap_accum
 
 log = logging.getLogger("stage7")
 
@@ -197,8 +198,10 @@ async def run(settings, dexscreener, geckoterminal, goplus, store, bitget_bases:
         d = r.detail
         r.line = (f"24h 거래량 ${d.get('volume_24h') or 0:,.0f} · 유동성 ${c.liquidity_usd or 0:,.0f} · "
                   f"가격 {d.get('change_24h') or 0:+.1f}%")
-        store.add_holder_snapshot(c.coin_key, sec_.holder_count, sec_.top10_pct)
-        eval_accum(c, store.holder_history(c.coin_key, week_ago))
+        snap_accum(store, c)
+        store.upsert_contract(c.coin_key, c.symbol, c.chain, c.address)
+        eval_accum(c, store.holder_history(c.coin_key, week_ago),
+                   tops=store.holder_top_history(c.coin_key, week_ago))
         c.stage("mcap").score = mcap_score(c.fdv or c.mcap)
         passed.append(c)
 

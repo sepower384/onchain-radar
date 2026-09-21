@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from scoring.engine import rank
 
 from . import security, stage1_accumulation, stage2_reaction, stage3_derivatives, stage5_revenue
-from . import stage7_microcap, stage8_retracement, universe
+from . import stage4_unlock, stage6_news, stage7_microcap, stage8_retracement, universe
 from .model import Candidate
 
 log = logging.getLogger("pipeline")
@@ -29,11 +29,15 @@ class Providers:
     geckoterminal: object
     defillama: object
     goplus: object
+    tokenomist: object = None       # Stage 4 — 키 있을 때만 enabled
+    nansen: object = None           # Stage 1 스마트머니 — 키 있을 때만 enabled
+    feeds: object = None            # Stage 6 거래소 공지·뉴스
 
     async def close(self):
         for p in (self.bitget, self.coingecko, self.dexscreener, self.geckoterminal,
-                  self.defillama, self.goplus):
-            await p.close()
+                  self.defillama, self.goplus, self.tokenomist, self.nansen, self.feeds):
+            if p is not None:
+                await p.close()
 
 
 @dataclass
@@ -44,6 +48,7 @@ class ScanResult:
     stats: dict = field(default_factory=dict)
     errors: list[str] = field(default_factory=list)
     took_s: float = 0.0
+    unlocks: list | None = None
 
 
 def make_providers(settings) -> Providers:
@@ -53,8 +58,11 @@ def make_providers(settings) -> Providers:
     from providers.dexscreener import DexScreener
     from providers.geckoterminal import GeckoTerminal
     from providers.goplus import GoPlus
+    from providers.nansen import Nansen
+    from providers.tokenomist import Tokenomist
     return Providers(Bitget(settings), CoinGecko(settings), DexScreener(settings),
-                     GeckoTerminal(settings), DefiLlama(settings), GoPlus(settings))
+                     GeckoTerminal(settings), DefiLlama(settings), GoPlus(settings),
+                     Tokenomist(settings), Nansen(settings), stage6_news.NewsFeeds(settings))
 
 
 async def _guard(name: str, res: ScanResult, coro):
@@ -93,15 +101,32 @@ async def scan_main(settings, P: Providers, store, *, deep_top: int = 40) -> Sca
     await _guard("Stage3", res, stage3_derivatives.run(reacting, P.bitget, store, cfg))
     res.revenue_ranking = await _guard("Stage5", res, stage5_revenue.run(reacting, P.defillama, cfg)) or []
 
+    # Stage 6 — 공지는 뉴스 작업이 10분마다 쌓는다. 여기서는 쌓인 걸 카드에 붙이기만(없으면 한 번 받는다).
+    if P.feeds is not None and not store.news_since(time.time() - 3600):
+        await _guard("Stage6 수집", res, stage6_news.refresh(settings, P.feeds, store))
+    try:
+        stage6_news.evaluate(reacting, store, cfg)
+    except Exception as e:  # noqa: BLE001
+        res.errors.append(f"Stage6: {e}")
+
+    # Stage 4 — 언락 (Tokenomist 키 있을 때만)
+    if P.tokenomist is not None and P.tokenomist.enabled:
+        res.unlocks = await _guard("Stage4", res, P.tokenomist.upcoming(int(cfg("stage4.lookahead_days", 14))))
+        stage4_unlock.evaluate(reacting, res.unlocks, cfg)
+
     # 무거운 조회는 1차 점수 상위만
-    weights = cfg("scoring.weights", {})
+    from tracking.tuner import effective_weights
+    weights = effective_weights(settings)
     required = tuple(cfg("scoring.required_signals", ["reaction"]) or ())
     # 보안·홀더 조회(코인게코 상세·GoPlus)는 비싸다 — 반응이 확인된 코인에만 쓴다.
     pre = rank(reacting, weights, min_signals=1, required=required)
     top = pre[:deep_top]
-    await _guard("보안", res, security.run(top, P.goplus, P.coingecko, P.dexscreener, cfg, top=deep_top))
+    await _guard("보안", res, security.run(top, P.goplus, P.coingecko, P.dexscreener, cfg, top=deep_top, store=store))
+    smart = None
+    if P.nansen is not None and P.nansen.enabled:
+        smart = await _guard("스마트머니", res, P.nansen.netflows(cfg("universe.pool_c_chains", ["ethereum"])))
     try:
-        stage1_accumulation.run(top, store)
+        stage1_accumulation.run(top, store, smart)
     except Exception as e:  # noqa: BLE001
         res.errors.append(f"Stage1: {e}")
 
