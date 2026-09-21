@@ -1,0 +1,177 @@
+# ONCHAIN RADAR 설정 — 임계값·가중치·주기는 전부 여기서만 바꾼다(코드에 하드코딩 금지).
+# 키는 .env 에 둔다. 이 파일에는 비밀값을 넣지 않는다.
+
+timezone: Asia/Seoul
+
+# ------------------------------------------------------------------ 텔레그램
+telegram:
+  # 자동 브리핑·실시간 알림을 받을 방. 비워 두면 화이트리스트의 첫 번째로 보낸다.
+  broadcast_chat_ids: []
+  # 명령어를 쓸 수 있는 chat_id. 비어 있으면 **아무도 못 쓴다**(안전 기본값).
+  # 실제 값은 .env 의 TELEGRAM_ALLOWED_CHAT_IDS 로 넣는 것을 권장한다.
+  allowed_chat_ids: []
+  briefing_times: ["08:00", "20:00"]     # KST
+  briefing_top_n: 7
+  message_limit: 4000                    # 텔레그램 4096자 — 여유를 둔다
+
+# ------------------------------------------------------------------ 스캔 유니버스
+universe:
+  pool_a_bitget: true                    # 비트겟 현물·선물 상장 코인 전체
+  pool_b_coingecko_top: 500              # 코인게코 시총 상위 N
+  pool_c_dex: true                       # DEX 트렌딩·신규 (Stage 7)
+  pool_c_min_liquidity_usd: 50000
+  pool_c_min_volume_24h_usd: 100000
+  pool_c_chains: [solana, base, ethereum, bsc, arbitrum]
+  exclude_stable: true                   # USDT·USDC 등은 스캔 대상에서 뺀다
+  stable_symbols: [USDT, USDC, DAI, FDUSD, TUSD, USDE, USDD, PYUSD, USD1, BUSD, USDS, FRAX, EURC]
+
+schedule:
+  pool_ab_minutes: 20                    # 풀 A·B (사양 15~30분)
+  pool_c_minutes: 5                      # 풀 C
+  revenue_minutes: 360                   # Stage 5 — DefiLlama 는 하루 단위라 자주 볼 필요 없다
+  holder_snapshot_minutes: 180           # 홀더 스냅샷 적재 주기
+  tracking_minutes: 60                   # 성과 추적(1/3/7/14일 가격 기록)
+
+# ------------------------------------------------------------------ Stage 2. 가격·거래량 초기 반응
+stage2:
+  volume_ratio_min: 2.0                  # 오늘 거래량 / 7일 평균 ≥ N배면 "반응 시작"
+  volume_ratio_full: 5.0                 # 이 배수에서 거래량 점수 만점
+  price_24h_min_pct: 3.0                 # 24h 이만큼은 올라야 "반응"
+  price_24h_max_pct: 15.0                # 넘으면 "이미 쐈다" 쪽
+  price_7d_max_pct: 30.0                 # 7일 누적 상한 — 넘으면 "늦음"
+  late_penalty: 25                       # 늦음 태그 감점
+  min_volume_24h_usd: 300000             # 예선 최소 거래대금 — 거래 없는 코인의 비율 튐 방지
+  max_deep: 150                          # 일봉 정밀 조회 상한 (상승장 예선 수백 개 → 한 바퀴 9분 걸렸다)
+
+# ------------------------------------------------------------------ Stage 3. 파생 과열 (선물 상장 코인만)
+stage3:
+  funding_hot_pct: 0.05                  # 8h 펀딩비 % (0.05% = 연 54%)
+  funding_extreme_pct: 0.10
+  long_ratio_hot: 0.70                   # 롱 계좌 비율
+  oi_jump_pct: 30.0                      # OI 가 24h 에 이만큼 늘었는데
+  oi_price_stall_pct: 3.0                # 가격이 이만큼도 안 움직이면 "OI 급증 대비 가격 정체"
+  overheat_penalty: 20
+
+# ------------------------------------------------------------------ Stage 4. 언락 (Tokenomist 키 있을 때만)
+stage4:
+  lookahead_days: 14
+  alert_days: [7, 3, 1]
+  big_unlock_pct: 2.0                    # 유통량 대비 % 이상이면 카드 경고
+  penalty_per_pct: 3                     # 유통량 1% 당 감점
+
+# ------------------------------------------------------------------ Stage 5. 매출 급증
+stage5:
+  surge_ratio_min: 1.5                   # 최근 7일 일평균 / 직전 30일 일평균
+  min_7d_revenue_usd: 20000              # 이보다 작으면 비율이 튀어도 무시(노이즈)
+  # 기준선(직전 30일 일평균)이 이보다 작으면 "급증"이라 부르지 않는다.
+  # 없으면 매출이 0 이던 신규 프로토콜이 +4,000,000% 로 1위를 차지한다(2026-09-21 첫 실행 실측).
+  min_base_daily_usd: 1000
+  require_token: true                    # 토큰(gecko_id)이 없는 프로토콜은 코인 봇에 무의미 — 뺀다
+  price_lag_max_7d_pct: 10.0             # 매출은 뛰는데 가격이 이만큼도 안 올랐으면 "펀더멘털 선행"
+  fundamental_lead_bonus: 15
+
+# ------------------------------------------------------------------ Stage 6. 실질 호재 (Anthropic 키 있을 때만)
+stage6:
+  enabled: false
+  model: claude-haiku-4-5-20251001
+  daily_call_limit: 200
+  monthly_budget_usd: 20
+
+# ------------------------------------------------------------------ Stage 7. 마이크로캡·DEX 전용
+stage7:
+  max_fdv_usd: 20000000                  # 이 밑만
+  min_liquidity_usd: 30000
+  min_pair_age_hours: 24                 # 막 생긴 페어는 제외
+  max_top10_holder_pct: 50.0             # 상위 10 지갑 집중도 상한(LP·소각 주소 제외)
+  max_tax_pct: 10.0
+  wash_volume_liquidity_ratio: 20.0      # 24h 거래량 / 유동성 이 이 이상이면 워시트레이딩 의심
+  late_24h_pct: 100.0                    # 24h 이 이상 오른 건 "늦음" (첫 실행에 +430% 가 1위였다)
+  late_penalty: 30
+  top_n: 10
+
+# ------------------------------------------------------------------ Stage 8. 급락 후 피보나치 되돌림 (/dip)
+# 강회장 요청: "잘 가다가 30~50% 급락한 코인을 피보나치 되돌림으로 패턴 분석해서 알림"
+stage8:
+  swing_window_days: 60                  # 이 안의 최고점을 스윙 고점으로 본다
+  leg_lookback_days: 45                  # 고점 이전 이만큼에서 상승 시작 저점을 찾는다
+  min_days_since_high: 2                 # 고점이 어제·오늘이면 아직 눌림이 아니다
+  min_leg_gain_pct: 60.0                 # "잘 가다가" = 저점→고점 +60% 이상
+  dd_min_pct: 30.0                       # 고점 대비 하락 하한
+  dd_max_pct: 50.0                       # 상한
+  invalid_ratio: 0.886                   # 이 되돌림을 넘으면 상승 구조 무효로 보고 제외
+  level_tolerance: 0.06                  # 피보나치 레벨 ± 이 안이면 "그 레벨"
+  bounce_lookback_days: 5
+  bounce_min_pct: 3.0                    # 최근 저점 대비 이만큼 반등해야 "반등"
+  exhaustion_ratio: 0.8                  # 최근 3일 거래량 < 하락 구간 평균 × 0.8 = 매도 소진
+  require_confirms: 2                    # 반등·캔들·매도소진 중 이 개수 이상이어야 알림
+  min_volume_24h_usd: 1000000            # 거래 없는 코인은 패턴이 의미 없다
+  alert_threshold: 60
+  scan_minutes: 60                       # 일봉 기준이라 자주 볼 필요 없다
+
+# ------------------------------------------------------------------ 점수
+scoring:
+  # 사용 가능한 신호만 모아 재정규화한다. 없는 신호를 0점으로 치지 않는다.
+  weights:
+    accumulation: 0.30                   # Stage 1 (Phase 2)
+    reaction: 0.25                       # Stage 2
+    derivatives: 0.15                    # Stage 3
+    revenue: 0.15                        # Stage 5
+    news: 0.10                           # Stage 6
+    security: 0.05                       # GoPlus 안전
+  alert_threshold: 75                    # 실시간 알림 기준 점수
+  min_signals: 2                         # 사용된 신호가 이보다 적으면 순위에서 제외
+  # 이 신호가 없으면 순위에 못 오른다. 파생·안전은 "나쁜 게 없다"일 뿐이라
+  # 둘만으로 100점이 나왔다(첫 실행). 봇의 본질 = 돈이 들어오는 반응.
+  required_signals: [reaction]
+  cooldown_hours: 6
+  cooldown_bypass_score_jump: 12         # 쿨다운 중이라도 점수가 이만큼 뛰면 다시 보낸다
+
+# ------------------------------------------------------------------ 구매 링크
+buy_links:
+  bitget_first: true                     # 강회장 지시: CEX 매수는 비트겟으로
+  bitget_spot_url: "https://www.bitget.com/spot/{symbol}"
+  bitget_futures_url: "https://www.bitget.com/futures/usdt/{symbol}"
+  microcap_label_prefix: "⚠️ 초고위험 · "
+  # 메인 트랙 DEX 매수 버튼은 이 유동성 이상 페어에만. BNB 카드에 이더리움 위 옛 ERC-20 BNB
+  # (0xb8c7…)로 Uniswap 버튼이 붙었다 — 진짜 BNB 가 아니다(2026-09-21 첫 실행).
+  min_dex_liquidity_usd: 250000
+  min_dex_liq_to_mcap_pct: 0.05          # DEX 유동성 / 시총. 옛 BNB 0.0003% vs 진짜 UNI 0.32%
+  max_price_gap_pct: 3.0                 # DEX 가격과 비트겟 가격 괴리 상한
+
+# 레퍼럴 — 비워 두면 일반 링크. 붙이는 곳은 bot/buy_links.py 한 군데뿐이다.
+# 비트겟: https://partner.bitget.com/bg/W63KTT → channelCode=yrbp&vipCode=m6v2 (2026-09-21 리다이렉트로 확인)
+referral:
+  bitget:
+    channelCode: yrbp
+    vipCode: m6v2
+  jupiter: {}
+  uniswap: {}
+  pancakeswap: {}
+
+# ------------------------------------------------------------------ 성과 추적
+tracking:
+  horizons_days: [1, 3, 7, 14]
+  dead_return_pct: -100                  # 가격 조회 실패·유동성 소멸은 누락이 아니라 -100%
+
+# ------------------------------------------------------------------ 데이터 공급자
+providers:
+  timeout_sec: 20
+  retries: 3
+  backoff_base_sec: 1.5
+  cache_ttl_sec:
+    bitget_symbols: 3600
+    bitget_tickers: 60
+    coingecko_markets: 600
+    dexscreener: 60
+    goplus: 21600
+    defillama_fees: 3600
+  rate_per_min:
+    coingecko: 25                        # Demo 키 30/분 — 여유를 둔다. 키 없으면 자동으로 10
+    goplus: 30
+    dexscreener: 250
+    geckoterminal: 25
+    bitget: 600
+    defillama: 60
+
+storage:
+  url: sqlite:///data/radar.db
