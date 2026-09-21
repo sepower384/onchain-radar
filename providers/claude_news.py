@@ -1,24 +1,33 @@
-"""Stage 6 뉴스 분류기 — 헤드라인을 '실질 호재 / 노이즈'로 가른다. ANTHROPIC_API_KEY 있을 때만.
+"""Stage 6 뉴스 분류기 — 헤드라인을 '실질 호재 / 노이즈'로 가른다. **API 과금 없이 구독으로.**
 
-규칙으로 가를 수 있는 거래소 공식 공지는 여기 오지 않는다(scanners/news_rules.py).
-여기는 CryptoPanic 같은 **일반 뉴스**만 — 사람 말이 섞여 규칙으로는 못 가르는 것들.
+강회장 지시(2026-09-21): "과금없이 구독에서 해결". 그래서 Anthropic API 를 부르지 않고,
+이 PC 에 로그인된 **Claude Code CLI(`claude -p`)** 를 헤드리스로 부른다 = 구독 사용량.
 
-비용 설계
-- 헤드라인을 **batch_size 개씩 묶어 한 번에** 분류한다(20개면 호출 수 1/20).
-- 하루 호출 상한(daily_call_limit)과 월 비용 상한(monthly_budget_usd)을 DB 에 기록하며 지킨다.
-  상한에 닿으면 그날/그달은 분류를 멈추고 카드에 "분류 보류"로 둔다 — 조용히 돈을 쓰지 않는다.
-- 분류는 판단이 얕은 작업이라 effort=low.
+실측으로 정한 호출 방식 (claude 2.1.278)
+  claude -p <헤드라인 묶음> --model haiku --output-format json --json-schema <스키마>
+         --system-prompt <분류 기준> --tools "" --no-session-persistence --disable-slash-commands
+         --strict-mcp-config --mcp-config {"mcpServers":{}}
+  환경: ANTHROPIC_API_KEY · ANTHROPIC_AUTH_TOKEN 제거(남아 있으면 **API 로 과금**된다),
+        CLAUDE_CODE_DISABLE_AUTO_MEMORY=1
+  - `--bare` 금지: OAuth 로그인을 안 읽어서 구독으로 못 돈다.
+  - MCP 를 안 끄면 연결된 도구 정의(Gmail·Slack·Notion…)가 실려 한 번에 6.8만 토큰. 끄면 약 5천(−90%).
+  - 분류 기준(SYSTEM)이 없으면 Haiku 가 "바이낸스 ZAMA 상장"을 노이즈로 오분류했다. 넣으면 10/10.
+  - 결과는 응답 JSON 의 `structured_output` 에 스키마대로 온다.
+  - 봇이 창 없이(pythonw) 돌므로 CLI 도 CREATE_NO_WINDOW 로 띄운다 — 콘솔이 깜빡이면 안 된다.
 
-API 사용 (claude-api 스킬 기준, 2026-09)
-- 공식 SDK `anthropic`(1.x) AsyncAnthropic. 구조화 출력은 output_config.format(json_schema).
-- claude-opus-5 는 서버측 fallback 을 기본으로 켠다(betas server-side-fallback-2026-07-01 + fallbacks="default").
-- stop_reason == "refusal" 은 content 를 읽기 전에 확인한다.
+규칙으로 가를 수 있는 거래소 공식 공지는 여기 오지 않는다(scanners/news_rules.py). 일반 뉴스만.
+하루 호출 상한(daily_call_limit)은 구독 사용량을 지키려고 둔다.
 """
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import json
 import logging
+import os
+import shutil
+import sys
+import tempfile
 
 log = logging.getLogger("claude_news")
 
@@ -38,7 +47,7 @@ roadmap restatements, "could"/"may"/"plans to", market recaps, and anything nega
 
 For partnerships you cannot know from a headline alone whether the counterparty confirmed it;
 set counterparty_confirmed to false unless the headline itself says both sides announced it.
-Write reason_ko in Korean, one short sentence."""
+Write reason_ko in Korean, one short sentence. Output only the requested JSON."""
 
 SCHEMA = {
     "type": "object",
@@ -66,36 +75,62 @@ SCHEMA = {
     "additionalProperties": False,
 }
 
+CREATE_NO_WINDOW = 0x08000000
+
+
+def cli_args(model: str, prompt: str) -> list[str]:
+    return ["-p", prompt, "--model", model, "--output-format", "json",
+            "--no-session-persistence", "--disable-slash-commands", "--tools", "",
+            "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
+            "--system-prompt", SYSTEM, "--json-schema", json.dumps(SCHEMA)]
+
+
+def cli_env() -> dict[str, str]:
+    """구독으로만 돌게 — API 키가 섞이면 과금된다."""
+    env = {k: v for k, v in os.environ.items() if k not in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")}
+    env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] = "1"
+    return env
+
 
 class NewsClassifier:
     def __init__(self, settings, store):
         self.s, self.store = settings, store
-        self.client = None
-        key = settings.key("ANTHROPIC_API_KEY")
-        if key and settings.get("stage6.enabled", False):
-            import anthropic
-            self.client = anthropic.AsyncAnthropic(api_key=key)
-        self.model = settings.get("stage6.model", "claude-opus-5")
+        self.exe = shutil.which("claude")
+        self.model = settings.get("stage6.model", "haiku")
         self.batch = int(settings.get("stage6.batch_size", 20))
-        price = settings.get("stage6.price_per_mtok", {"input": 5.0, "output": 25.0}) or {}
-        self.p_in, self.p_out = float(price.get("input", 5.0)), float(price.get("output", 25.0))
+        self.timeout = float(settings.get("stage6.timeout_sec", 240))
 
     @property
     def enabled(self) -> bool:
-        return self.client is not None
+        return bool(self.s.get("stage6.enabled", True)) and self.exe is not None
 
     def budget_left(self) -> tuple[bool, str]:
-        today = dt.date.today()
-        calls = self.store.llm_calls(today)
-        spent = self.store.llm_cost_month(today.year, today.month)
-        if calls >= int(self.s.get("stage6.daily_call_limit", 200)):
+        calls = self.store.llm_calls(dt.date.today())
+        if calls >= int(self.s.get("stage6.daily_call_limit", 50)):
             return False, f"오늘 호출 상한 {calls}회 도달"
-        if spent >= float(self.s.get("stage6.monthly_budget_usd", 20)):
-            return False, f"이달 비용 상한 ${spent:.2f} 도달"
         return True, ""
 
+    async def _run(self, prompt: str) -> dict | None:
+        kw = {}
+        if sys.platform == "win32":
+            kw["creationflags"] = CREATE_NO_WINDOW
+        proc = await asyncio.create_subprocess_exec(
+            self.exe, *cli_args(self.model, prompt), stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE, env=cli_env(), cwd=tempfile.gettempdir(), **kw)
+        try:
+            out, err = await asyncio.wait_for(proc.communicate(), timeout=self.timeout)
+        except asyncio.TimeoutError:
+            proc.kill()
+            log.warning("claude -p 시간 초과")
+            return None
+        try:
+            return json.loads(out.decode("utf-8", "replace"))
+        except ValueError:
+            log.warning("claude -p 출력이 JSON 이 아님: %s", err.decode("utf-8", "replace")[:200])
+            return None
+
     async def classify(self, items: list[dict]) -> dict[str, dict]:
-        """{item id: 분류}. 상한·거절·오류면 그 묶음은 비운다(추정하지 않는다)."""
+        """{item id: 분류}. 상한·실패면 그 묶음은 비운다(추정하지 않는다)."""
         if not self.enabled or not items:
             return {}
         out: dict[str, dict] = {}
@@ -105,35 +140,18 @@ class NewsClassifier:
                 log.warning("뉴스 분류 중단 — %s", why)
                 break
             chunk = items[i:i + self.batch]
-            lines = "\n".join(f"{it['id']}\t{it['title']}" for it in chunk)
-            try:
-                resp = await self.client.beta.messages.create(
-                    model=self.model,
-                    max_tokens=4000,
-                    system=SYSTEM,
-                    messages=[{"role": "user", "content":
-                               "Classify each headline (id<TAB>headline):\n" + lines}],
-                    output_config={"effort": self.s.get("stage6.effort", "low"),
-                                   "format": {"type": "json_schema", "schema": SCHEMA}},
-                    betas=["server-side-fallback-2026-07-01"],
-                    fallbacks="default",
-                )
-            except Exception as e:  # noqa: BLE001 — 분류 실패가 스캔을 멈추면 안 된다
-                log.warning("뉴스 분류 호출 실패: %s", type(e).__name__)
+            prompt = "Classify each headline (id<TAB>headline):\n" + "\n".join(
+                f"{it['id']}\t{it['title']}" for it in chunk)
+            d = await self._run(prompt)
+            if d is None:
                 continue
-            self._record(resp)
-            if resp.stop_reason == "refusal":
-                log.warning("뉴스 분류 거절(refusal) — 이 묶음은 건너뛴다")
+            u = d.get("usage") or {}
+            # 구독이라 실제 청구는 없다. 환산값은 사용량 추적용으로만 적는다.
+            self.store.log_llm(f"cli:{self.model}", int(u.get("input_tokens") or 0),
+                               int(u.get("output_tokens") or 0), float(d.get("total_cost_usd") or 0))
+            if d.get("is_error") or d.get("subtype") != "success":
+                log.warning("claude -p 실패: %s", d.get("subtype"))
                 continue
-            text = next((b.text for b in resp.content if b.type == "text"), "")
-            try:
-                for row in json.loads(text).get("items", []):
-                    out[row["id"]] = row
-            except (ValueError, KeyError):
-                log.warning("분류 응답 파싱 실패 (stop_reason=%s)", resp.stop_reason)
+            for row in (d.get("structured_output") or {}).get("items", []):
+                out[row["id"]] = row
         return out
-
-    def _record(self, resp) -> None:
-        u = resp.usage
-        cost = (u.input_tokens * self.p_in + u.output_tokens * self.p_out) / 1e6
-        self.store.log_llm(self.model, u.input_tokens, u.output_tokens, cost)

@@ -19,6 +19,7 @@ import asyncio
 import datetime as dt
 import json
 import logging
+import sys
 import time
 from html import escape
 
@@ -570,7 +571,28 @@ def build_app(settings) -> Application:
     return app
 
 
+def _single_instance():
+    """봇은 한 개만. 두 개가 같은 토큰으로 폴링하면 텔레그램이 409 Conflict 를 내고,
+    스캔도 두 배로 돌아 비트겟 429 가 쏟아진다(2026-09-21 실측). 예약작업이 10분마다
+    '살아 있나' 확인차 다시 띄워도 안전하도록 파일 잠금으로 막는다."""
+    lock_path = ROOT / "data" / "bot.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fh = open(lock_path, "a+")
+    try:
+        if sys.platform == "win32":
+            import msvcrt
+            msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        log.info("이미 실행 중 — 종료")
+        raise SystemExit(0)
+    return fh            # 프로세스가 사는 동안 잡고 있어야 잠금이 유지된다
+
+
 def run_bot(settings) -> int:
+    _lock = _single_instance()  # noqa: F841
     app = build_app(settings)
     log.info("봇 시작 — 허용 %d개 · 브로드캐스트 %s", len(settings.allowed_chat_ids), settings.broadcast_chat_ids)
     app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)

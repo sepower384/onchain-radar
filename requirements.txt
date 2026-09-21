@@ -11,4 +11,4 @@ python-dotenv>=1.0
 pytest>=8.0
 pytest-asyncio>=0.23
 respx>=0.21
-anthropic>=0.70                # Stage 6 뉴스 분류 (키 있을 때만 사용)
+truststore>=0.9              # 윈도우 시스템 인증서 사용 (사내 인증서 환경에서 SSL 검증 실패 방지)

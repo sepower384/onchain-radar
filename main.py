@@ -20,7 +20,15 @@ import re
 import sys
 from html import unescape
 
-import settings as S
+# 윈도우 시스템 인증서 저장소를 쓴다 — 이 PC 는 기본 certifi 번들로는 텔레그램 SSL 검증이 실패했다
+# (CERTIFICATE_VERIFY_FAILED, 2026-09-21 첫 구동). 모든 import 보다 먼저 해야 먹는다.
+try:
+    import truststore
+    truststore.inject_into_ssl()
+except ImportError:
+    pass
+
+import settings as S  # noqa: E402
 
 LOG_FMT = "%(asctime)s %(levelname).1s %(name)s: %(message)s"
 

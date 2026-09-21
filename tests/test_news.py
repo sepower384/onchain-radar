@@ -8,7 +8,7 @@ from scanners.model import Candidate
 from storage.db import Store
 
 CFG = {"stage6.lookback_hours": 72, "stage6.risk_lookback_days": 14, "stage6.risk_penalty": 30,
-       "stage6.enabled": True, "stage6.daily_call_limit": 2, "stage6.monthly_budget_usd": 20}
+       "stage6.enabled": False, "stage6.daily_call_limit": 2}
 
 
 def cfg(k, d=None):
@@ -70,7 +70,7 @@ def test_뉴스_없으면_None_재정규화에서_빠진다():
     assert c.stages["news"].score is None and not c.penalties
 
 
-def test_키가_없으면_일반뉴스는_미분류로_남는다():
+def test_분류기가_꺼져_있으면_일반뉴스는_미분류로_남는다():
     st = Store("sqlite:///:memory:")
     asyncio.run(s6.refresh(S(), FakeFeeds([{"source": "cryptopanic", "id": "cp:1", "ts": NOW, "url": "u",
                                             "title": "X partners with Y", "symbols": ["X"]}]), st))
@@ -87,12 +87,17 @@ def test_하루_호출_상한을_넘으면_멈춘다():
     assert not ok and "호출 상한" in why
 
 
-def test_월_비용_상한():
-    st = Store("sqlite:///:memory:")
-    CFG["stage6.daily_call_limit"] = 999
+def test_구독_호출은_API_키를_지운_환경으로():
+    """API 키가 섞이면 구독이 아니라 API 로 과금된다 — 강회장 지시 '과금 없이'."""
+    import os
+    from providers.claude_news import cli_args, cli_env
+    os.environ["ANTHROPIC_API_KEY"] = "sk-should-not-leak"
     try:
-        st.log_llm("claude-opus-5", 1, 1, 25.0)
-        ok, why = NewsClassifier(S(), st).budget_left()
-        assert not ok and "비용 상한" in why
+        env = cli_env()
+        assert "ANTHROPIC_API_KEY" not in env and "ANTHROPIC_AUTH_TOKEN" not in env
     finally:
-        CFG["stage6.daily_call_limit"] = 2
+        del os.environ["ANTHROPIC_API_KEY"]
+    args = cli_args("haiku", "x")
+    assert "--bare" not in args                      # bare 는 구독 로그인을 안 읽는다
+    assert "--strict-mcp-config" in args             # MCP 도구 정의가 실리면 토큰 13배
+    assert args[args.index("--tools") + 1] == ""
