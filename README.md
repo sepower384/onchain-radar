@@ -115,13 +115,19 @@ wscript start_hidden.vbs
 .venv\Scripts\python -m pytest -m live    # 실검증 7개: 링크가 정말 그 토큰을 여는가, 레퍼럴 코드 일치
 ```
 
-## 배포
+## 배포 — 깃허브 Actions 무료 구동 (2026-09-22~ 가동)
 
-PC 가 절전에 들어가면 알림이 멈춘다(관제탑 교훈). 실시간 알림을 안정적으로 받으려면 VPS 권장.
+VPS 없이 공개 저장소 `sepower384/onchain-radar` 의 Actions 로 돈다(공개 저장소는 실행 시간 무료).
 
-- **VPS (권장)** — 월 $5 급이면 충분. `git clone` → venv → `.env` → `systemd` 서비스로 `python main.py run`
-- **Railway** — 저장소 연결, Start Command `python main.py run`, 환경변수에 `.env` 내용. SQLite 는 볼륨을 붙여야 재배포 때 안 날아간다
-- 깃허브 Actions 는 **부적합** — 명령어 응답에 상시 프로세스가 필요하다
+- `main.py tick` = **한 번 깨어나서 밀린 명령 처리 + 주기가 돌아온 작업만 하고 끝**(`bot/tick.py`).
+  명령 답은 최대 5분 늦다. 마지막 실행 시각·DB 는 `actions/cache` 로 다음 실행에 넘긴다.
+- 깨우기: cron-job.org 가 5분마다 `workflow_dispatch` (`python tools/cron_setup.py <PAT> <CJ키>`).
+  워크플로 안의 `schedule`(30분)은 예비용 — 깃허브 schedule 은 붐비면 건너뛴다.
+- Secrets: `TELEGRAM_BOT_TOKEN` · `TELEGRAM_ALLOWED_CHAT_IDS` (필수) / `COINGECKO_DEMO_KEY` ·
+  `CLAUDE_CODE_OAUTH_TOKEN`(`claude setup-token` — 구독으로 오른 이유·백커 조사·뉴스 분류, 과금 아님) 선택.
+- **PC 예약작업 OnchainRadar 는 꺼 둔다.** 같은 토큰으로 두 곳에서 getUpdates 하면 409 충돌.
+- 클라우드(미국 IP) 실측: 업비트 공지 403(비트겟·바이낸스 공지는 됨), 지오테르미널 간헐 429,
+  비트겟 캔들 429 는 재시도로 전부 회복. 첫 실행 115초.
 
 ---
 

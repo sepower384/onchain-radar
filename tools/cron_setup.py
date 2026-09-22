@@ -1,0 +1,56 @@
+# -*- coding: utf-8 -*-
+"""cron-job.org 에 ONCHAIN RADAR 트리거 등록 (같은 제목은 지우고 다시 만듦 = 여러 번 돌려도 안전).
+
+  python tools/cron_setup.py <GitHub PAT(Actions RW, onchain-radar 포함)> <cron-job.org API 키>
+
+  [GH] onchain-radar-tick : 5분마다 (02·07·12…57분)  → tick.yml workflow_dispatch
+
+깃허브 schedule 은 붐비면 건너뛰어서(실측 1/8만 돎) 다른 봇들과 같이 cron-job.org 가 깨운다.
+한글 제목은 Git Bash curl 로 보내면 조용히 무시되므로 requests 로 보낸다.
+"""
+import json
+import sys
+
+import requests
+
+REPO = "sepower384/onchain-radar"
+API = "https://api.cron-job.org"
+DISPATCH = "https://api.github.com/repos/%s/actions/workflows/tick.yml/dispatches" % REPO
+TITLE = "[GH] onchain-radar-tick"
+
+
+def job(pat):
+    return {"job": {
+        "url": DISPATCH, "enabled": True, "title": TITLE, "saveResponses": False,
+        "requestMethod": 1,  # POST
+        "schedule": {"timezone": "Asia/Seoul", "expiresAt": 0, "hours": [-1], "mdays": [-1],
+                     "minutes": list(range(2, 60, 5)), "months": [-1], "wdays": [-1]},
+        "notification": {"onFailure": True, "onSuccess": False, "onDisable": True},
+        "extendedData": {
+            "headers": {"Authorization": "Bearer " + pat, "Accept": "application/vnd.github+json",
+                        "X-GitHub-Api-Version": "2022-11-28", "Content-Type": "application/json"},
+            "body": json.dumps({"ref": "master"})},
+    }}
+
+
+def main(pat, key):
+    h = {"Authorization": "Bearer " + key, "Content-Type": "application/json"}
+    # PAT 권한 확인: 없는 ref 로 dispatch → 422 면 권한 있음
+    r = requests.post(DISPATCH, json={"ref": "no-such-ref"},
+                      headers={"Authorization": "Bearer " + pat, "Accept": "application/vnd.github+json"})
+    if r.status_code != 422:
+        print("PAT 권한 없음(%d): %s — PAT 의 Repository access 에 onchain-radar 추가, Actions Read/write"
+              % (r.status_code, r.text[:80]))
+    for j in requests.get(API + "/jobs", headers=h).json().get("jobs", []):
+        if j["title"] == TITLE:
+            requests.delete(API + "/jobs/%d" % j["jobId"], headers=h).raise_for_status()
+            print("삭제:", TITLE)
+    r = requests.put(API + "/jobs", headers=h, data=json.dumps(job(pat)))
+    r.raise_for_status()
+    print("등록:", TITLE, r.json())
+
+
+if __name__ == "__main__":
+    if len(sys.argv) != 3:
+        sys.exit(__doc__)
+    main(sys.argv[1], sys.argv[2])
