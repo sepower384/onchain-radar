@@ -1,0 +1,66 @@
+# ONCHAIN RADAR — PC·VPS 없이 무료로 돈다(공개 저장소 Actions).
+# 주 트리거는 cron-job.org 가 5분마다 workflow_dispatch 로 깨운다(다른 봇들과 같은 방식).
+# 깃허브 schedule 은 붐비면 건너뛰어서(실측 1/8) 예비로만 둔다.
+#
+# 매 실행: 밀린 텔레그램 명령 처리 → 주기가 돌아온 작업만 → 끝 (bot/tick.py)
+# 상태(DB)는 actions/cache 로 다음 실행에 넘긴다. 저장소에는 올리지 않는다.
+#
+# Secrets
+#   TELEGRAM_BOT_TOKEN          (필수) @sepower_onchain_bot
+#   TELEGRAM_ALLOWED_CHAT_IDS   (필수) 1397761239
+#   COINGECKO_DEMO_KEY          (권장, 무료) 없으면 429 대기로 느려진다
+#   CLAUDE_CODE_OAUTH_TOKEN     (선택) `claude setup-token` — 구독으로 오른이유·백커 조사/뉴스 분류. 과금 아님
+name: radar-tick
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "7,37 * * * *"        # 예비 — 체인이 끊겨도 30분 안에 다시 돈다
+
+concurrency:
+  group: radar
+  cancel-in-progress: false
+
+jobs:
+  tick:
+    runs-on: ubuntu-latest
+    timeout-minutes: 14
+    env:
+      # step 의 if 는 같은 step 의 env 를 못 읽는다 — job 단위에 둔다
+      HAS_CLAUDE: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      - name: 이전 상태(DB) 불러오기
+        uses: actions/cache/restore@v4
+        with:
+          path: data
+          key: radar-data-${{ github.run_id }}
+          restore-keys: radar-data-
+
+      - name: Claude Code (구독 조사용, 토큰 있을 때만)
+        if: ${{ env.HAS_CLAUDE == 'true' }}
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: tick
+        env:
+          PYTHONUTF8: "1"
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_ALLOWED_CHAT_IDS: ${{ secrets.TELEGRAM_ALLOWED_CHAT_IDS }}
+          COINGECKO_DEMO_KEY: ${{ secrets.COINGECKO_DEMO_KEY }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+        run: python main.py tick
+
+      - name: 상태(DB) 저장
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: data
+          key: radar-data-${{ github.run_id }}

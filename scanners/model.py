@@ -65,6 +65,8 @@ class Candidate:
 
     score: float = 0.0
     signals_used: int = 0
+    breakdown: list = field(default_factory=list)   # [(신호, 점수, 정규화 가중치, 기여점)]
+    research: dict | None = None                    # 카드 보강 조사(오른 이유·백커)
 
     @property
     def signals_total(self) -> int:

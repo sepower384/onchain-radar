@@ -118,3 +118,29 @@ def test_되돌림_카드():
     c.score = 90
     t = dip_card(c)
     assert "피보나치" in t and "무효화" in t and "반등 확인" in t
+
+
+def test_카드에_오른이유_백커_시총_점수근거():
+    from scanners.research import clean
+    from scoring.engine import score
+    c = Candidate(coin_key="cg:zama", symbol="ZAMA", mcap=234e6, fdv=1072e6, price=0.0948,
+                  bitget_spot="ZAMAUSDT")
+    c.stages["reaction"] = StageResult(score=80, line="x", detail={"volume_ratio": 2.4})
+    c.stages["derivatives"] = StageResult(score=70, line="y")
+    score(c, {"reaction": 0.25, "derivatives": 0.15})
+    c.research = clean({
+        "why_up": [{"reason_ko": "FHE 섹터 자금 유입", "source_url": "https://ex.com/a"},
+                   {"reason_ko": "출처 없는 주장", "source_url": ""}],
+        "rounds": [{"round": "Series B", "amount_usd": 57e6, "date": "2025-06", "lead": ["Pantera"],
+                    "source_url": "https://ex.com/b"},
+                   {"round": "Series A", "amount_usd": 73e6, "date": "2024-03", "lead": ["Multicoin"],
+                    "source_url": "https://ex.com/c"},
+                   {"round": "가짜", "amount_usd": 999e6, "date": "2024-01", "lead": [], "source_url": ""}],
+        "backers": ["Pantera Capital", "Multicoin Capital"]})
+    t = card_with_block_note(c, links_for(c, LinkBuilder(S(CFG))))
+    assert "거래량이 평소(7일 평균)의 2.4배" in t
+    assert "FHE 섹터 자금 유입" in t and "출처 없는 주장" not in t      # 출처 없으면 버린다
+    assert "공개 누적 $130.0M(2건)" in t                                 # 합계는 코드가 — AI 숫자 안 믿음
+    assert "Pantera Capital" in t and "최근 Series B $57.0M" in t
+    assert "FDV $1.1B (유통 22%)" in t
+    assert "점수 근거" in t and "반응 80×62%" in t

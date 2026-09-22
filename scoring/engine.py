@@ -15,15 +15,20 @@ from scanners.model import SIGNALS, Candidate
 def score(c: Candidate, weights: dict[str, float]) -> Candidate:
     num = den = 0.0
     used = 0
+    parts = []
     for name in SIGNALS:
         st = c.stages.get(name)
         w = float(weights.get(name, 0) or 0)
         if st is None or st.score is None or w <= 0:
             continue
-        num += w * max(0.0, min(100.0, st.score))
+        v = max(0.0, min(100.0, st.score))
+        num += w * v
         den += w
         used += 1
+        parts.append((name, v, w))
     base = num / den if den > 0 else 0.0
+    # 카드의 "점수 근거" — 재정규화한 가중치와 각 신호가 종합점수에 보탠 점수
+    c.breakdown = [(n, v, w / den, v * w / den) for n, v, w in parts] if den else []
     penalty = sum(p for _, p in c.penalties)
     c.score = round(max(0.0, min(100.0, base - penalty)), 1)
     c.signals_used = used

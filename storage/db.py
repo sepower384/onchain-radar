@@ -153,6 +153,29 @@ class NewsItem(Base):
     alerted: Mapped[int] = mapped_column(Integer, default=0)
 
 
+class ResearchCache(Base):
+    """카드 보강 조사(오른 이유·백커) 캐시 — 구독 사용량 절약."""
+    __tablename__ = "research_cache"
+    coin_key: Mapped[str] = mapped_column(String(160), primary_key=True)
+    ts_why: Mapped[float] = mapped_column(Float)
+    ts_fund: Mapped[float] = mapped_column(Float)
+    data: Mapped[str] = mapped_column(Text)
+
+
+class ResearchLog(Base):
+    __tablename__ = "research_log"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    day: Mapped[str] = mapped_column(String(10), index=True)
+    cost_equiv: Mapped[float] = mapped_column(Float)
+
+
+class JobState(Base):
+    """tick 모드용 — 작업별 마지막 실행 시각, 텔레그램 update offset."""
+    __tablename__ = "jobs_state"
+    name: Mapped[str] = mapped_column(String(60), primary_key=True)
+    value: Mapped[float] = mapped_column(Float)
+
+
 class Click(Base):
     __tablename__ = "clicks"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -342,6 +365,49 @@ class Store:
                 n = s.get(NewsItem, i)
                 if n:
                     n.alerted = 1
+            s.commit()
+
+    def research_get(self, coin_key: str) -> dict | None:
+        with self.session() as s:
+            r = s.get(ResearchCache, coin_key)
+            return {"ts_why": r.ts_why, "ts_fund": r.ts_fund, "data": json.loads(r.data)} if r else None
+
+    def research_put(self, coin_key: str, data: dict):
+        t = time.time()
+        with self.session() as s:
+            s.merge(ResearchCache(coin_key=coin_key, ts_why=t, ts_fund=t, data=json.dumps(data, ensure_ascii=False)))
+            s.commit()
+
+    def log_research(self, cost_equiv: float):
+        import datetime as _dt
+        with self.session() as s:
+            s.add(ResearchLog(day=_dt.date.today().isoformat(), cost_equiv=cost_equiv))
+            s.commit()
+
+    def research_calls(self, day) -> int:
+        from sqlalchemy import func
+        with self.session() as s:
+            return s.scalar(select(func.count()).select_from(ResearchLog)
+                            .where(ResearchLog.day == day.isoformat())) or 0
+
+    def job_last(self, name: str) -> float | None:
+        with self.session() as s:
+            row = s.get(JobState, name)
+            return row.value if row else None
+
+    def job_mark(self, name: str, value: float):
+        with self.session() as s:
+            s.merge(JobState(name=name, value=value))
+            s.commit()
+
+    def prune(self, days: int = 9):
+        """깃허브 캐시로 넘기는 DB 가 끝없이 커지지 않게 — 가격 스냅샷은 8일치면 충분하다
+        (7일 평균·24h OI 비교용). 신호·수익률 원장은 지우지 않는다."""
+        cut = time.time() - days * 86400
+        with self.session() as s:
+            s.query(PriceSnapshot).filter(PriceSnapshot.ts < cut).delete()
+            s.query(HolderTop).filter(HolderTop.ts < cut).delete()
+            s.query(HolderSnapshot).filter(HolderSnapshot.ts < cut).delete()
             s.commit()
 
     def log_click(self, chat_id: int, coin_key: str, venue: str):

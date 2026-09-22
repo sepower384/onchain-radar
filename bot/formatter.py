@@ -51,6 +51,93 @@ def grade(score: float) -> str:
     return "🟢" if score >= 75 else ("🟡" if score >= 55 else "⚪")
 
 
+SIG_KO = {"accumulation": "매집", "reaction": "반응", "derivatives": "파생", "revenue": "매출",
+          "news": "호재", "security": "안전", "mcap": "소형가점"}
+
+
+def signal_reasons(c: Candidate) -> list[str]:
+    """데이터로 확인된 상승 근거 — 추측 없이 우리가 잰 것만."""
+    out = []
+    r = c.stages.get("reaction")
+    vr = (r.detail or {}).get("volume_ratio") if r else None
+    if vr and vr >= 1.5:
+        out.append(f"거래량이 평소(7일 평균)의 {vr:.1f}배")
+    n = c.stages.get("news")
+    if n and n.score is not None and n.line:
+        out.append(n.line)
+    rv = c.stages.get("revenue")
+    ratio = (rv.detail or {}).get("ratio") if rv else None
+    if ratio and ratio >= 1.5:
+        out.append(f"프로토콜 매출이 30일 평균 대비 {(ratio - 1) * 100:+.0f}%")
+    a = c.stages.get("accumulation")
+    d = (a.detail or {}) if a else {}
+    if (d.get("smart_net_7d") or 0) > 0:
+        out.append("스마트머니 7일 순매수")
+    if (d.get("whale_pp") or 0) > 0.1:
+        out.append(f"상위 개인지갑 비중 {d['whale_pp']:+.2f}%p")
+    if (d.get("exchange_pp") or 0) < -0.1:
+        out.append(f"거래소 지갑에서 {abs(d['exchange_pp']):.2f}%p 순유출")
+    if c.funding_pct is not None and c.funding_pct < 0 and c.bitget_futures:
+        out.append("선물 펀딩비 음수(숏 우위 — 숏 청산 연료)")
+    return out
+
+
+def reason_block(c: Candidate) -> list[str]:
+    e = escape
+    L = []
+    sig = signal_reasons(c)
+    ai = (c.research or {}).get("why_up") or []
+    if sig or ai:
+        L.append("🚀 <b>오른 이유</b>")
+        L += [f"  · {e(s)}" for s in sig]
+        L += [f'  · {e(w["reason_ko"])} <a href="{e(w["source_url"])}">[출처]</a>' for w in ai]
+    return L
+
+
+def backer_block(c: Candidate) -> list[str]:
+    e = escape
+    r = c.research or {}
+    backers, rounds = r.get("backers") or [], r.get("rounds") or []
+    if not backers and not rounds:
+        return []
+    parts = []
+    if r.get("total_raised_usd"):
+        n = len([x for x in rounds if x.get("amount_usd")])
+        und = f" · 비공개 {r['undisclosed_rounds']}건" if r.get("undisclosed_rounds") else ""
+        parts.append(f"공개 누적 {money(r['total_raised_usd'])}({n}건{und})")
+    if rounds:
+        x = rounds[0]
+        amt = f" {money(x['amount_usd'])}" if x.get("amount_usd") else ""
+        lead = f", {', '.join(x['lead'][:2])}" if x.get("lead") else ""
+        parts.append(f'최근 {e(x["round"])}{amt} ({e(x.get("date") or "")}{e(lead)}) '
+                     f'<a href="{e(x["source_url"])}">[출처]</a>')
+    L = ["💼 <b>백커</b> " + (" · ".join(e(b) for b in backers[:5]) if backers else "")]
+    if parts:
+        L.append("  " + " · ".join(parts))
+    return L
+
+
+def score_block(c: Candidate) -> str:
+    if not c.breakdown:
+        return ""
+    parts = [f"{SIG_KO.get(n, n)} {v:.0f}×{w * 100:.0f}%={pts:.0f}" for n, v, w, pts in
+             sorted(c.breakdown, key=lambda x: -x[3])]
+    pen = sum(p for _, p in c.penalties)
+    tail = f" − 감점 {pen:.0f}" if pen else ""
+    return f"🧮 <b>점수 근거</b> {' + '.join(parts)}{tail} → <b>{c.score:.0f}</b>"
+
+
+def cap_line(c: Candidate) -> str:
+    if not (c.mcap or c.fdv):
+        return ""
+    s = f"💎 시총 {money(c.mcap)}" if c.mcap else "💎 시총 -"
+    if c.fdv and c.mcap and c.fdv > c.mcap * 1.02:
+        s += f" · FDV {money(c.fdv)} (유통 {c.mcap / c.fdv * 100:.0f}%)"
+    if c.price:
+        s += f" · 가격 {price_fmt(c.price)}"
+    return s
+
+
 def card(c: Candidate) -> str:
     e = escape
     L = []
@@ -59,8 +146,16 @@ def card(c: Candidate) -> str:
              f"사용된 신호 {c.signals_used}/{c.signals_total} | 시총 {money(mc)} | CEX: {c.cex_label}")
     if c.chain and c.address:
         L.append(f"🔗 체인: {CHAIN_KO.get(c.chain, c.chain)} | CA: <code>{e(c.address)}</code>")
+    cl = cap_line(c)
+    if cl:
+        L.append(cl)
     elif c.price:
         L.append(f"💵 가격 {price_fmt(c.price)}")
+    L += reason_block(c)
+    L += backer_block(c)
+    sb = score_block(c)
+    if sb:
+        L.append(sb)
 
     def line(icon, label, key):
         st = c.stages.get(key)
@@ -100,6 +195,14 @@ def dip_card(c: Candidate) -> str:
         L.append(f"🔁 반등 확인: {e(d['confirm'])}")
     if d.get("invalid"):
         L.append(f"⛔ 무효화: {e(d['invalid'])}")
+    cl = cap_line(c)
+    if cl:
+        L.append(cl)
+    ai = (c.research or {}).get("why_up") or []
+    if ai:
+        L.append("📰 <b>최근 움직임</b>")
+        L += [f'  · {e(w["reason_ko"])} <a href="{e(w["source_url"])}">[출처]</a>' for w in ai]
+    L += backer_block(c)
     tags = [t for t in dict.fromkeys(c.tags) if t]
     if tags:
         L.append("🏷️ " + " · ".join(e(t) for t in tags))

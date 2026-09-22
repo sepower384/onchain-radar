@@ -65,6 +65,8 @@ class Radar:
         self.store = Store(settings.get("storage.url"))
         self.P = make_providers(settings)
         self.lb = LinkBuilder(settings)
+        from scanners.research import Researcher
+        self.researcher = Researcher(settings, self.store)
         self.lock = asyncio.Lock()
         self.last: dict[str, tuple[float, ScanResult]] = {}
 
@@ -108,6 +110,10 @@ async def send_cards(bot, chat_id: int, radar: Radar, cands, *, title: str, sub:
         await bot.send_message(chat_id, MICRO_BANNER, parse_mode=ParseMode.HTML)
     if not cands:
         await bot.send_message(chat_id, "조건을 통과한 코인이 없습니다.", parse_mode=ParseMode.HTML)
+    # 오른 이유·백커 조사 — 보내는 카드 상위 몇 개만(구독 사용량), 캐시되어 있으면 즉시
+    from scanners.research import enrich_many
+    await enrich_many(list(cands), getattr(radar, "researcher", None),
+                      top=int(radar.s.get("research.top_n", 5)))
     for c in cands:
         ls = links_for(c, radar.lb)
         text = dip_card(c) if dip else card_with_block_note(c, ls)

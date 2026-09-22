@@ -2,8 +2,7 @@
 .venv/
 __pycache__/
 *.pyc
-data/*.db
-data/*.db-*
+data/
 logs/
 probe/out/
 .pytest_cache/

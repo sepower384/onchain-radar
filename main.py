@@ -7,6 +7,7 @@
   python main.py revenue        매출 급증 랭킹 → 콘솔 출력
   python main.py chats          봇에게 말 건 chat_id 확인 (허용 목록 설정용)
   python main.py track          성과 추적 1회 (1/3/7/14일 수익률 기록)
+  python main.py tick           깃허브 Actions 용: 밀린 명령 처리 + 주기 돌아온 작업만 하고 끝
 
   --top N      출력 개수 (기본 10)
   --send       scan·micro 결과를 텔레그램 브로드캐스트 방으로 실제 전송
@@ -36,7 +37,9 @@ LOG_FMT = "%(asctime)s %(levelname).1s %(name)s: %(message)s"
 def setup_logging(level=logging.INFO):
     (S.ROOT / "logs").mkdir(exist_ok=True)
     handlers = [logging.FileHandler(S.ROOT / "logs" / "radar.log", encoding="utf-8")]
-    if sys.stdout and sys.stdout.isatty():
+    import os
+    # 깃허브 Actions 에선 터미널이 아니지만 로그가 화면(Actions 로그)에 보여야 한다
+    if (sys.stdout and sys.stdout.isatty()) or os.environ.get("GITHUB_ACTIONS"):
         handlers.append(logging.StreamHandler())
     logging.basicConfig(level=level, format=LOG_FMT, handlers=handlers, force=True)
     for noisy in ("httpx", "httpcore", "telegram", "apscheduler"):
@@ -155,7 +158,7 @@ async def cmd_chats(s):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description="ONCHAIN RADAR")
-    ap.add_argument("cmd", choices=["run", "scan", "micro", "dip", "revenue", "chats", "track"])
+    ap.add_argument("cmd", choices=["run", "scan", "micro", "dip", "revenue", "chats", "track", "tick"])
     ap.add_argument("--top", type=int, default=10)
     ap.add_argument("--send", action="store_true")
     ap.add_argument("-v", "--verbose", action="store_true")
@@ -177,6 +180,11 @@ def main(argv=None):
         asyncio.run(cmd_revenue(args, s))
     elif args.cmd == "chats":
         asyncio.run(cmd_chats(s))
+    elif args.cmd == "tick":
+        from bot.tick import run_tick
+        from storage.db import Store
+        asyncio.run(run_tick(s))
+        Store(s.get("storage.url")).prune()
     elif args.cmd == "track":
         from tracking.tracker import run_once
         asyncio.run(run_once(s))
