@@ -15,6 +15,7 @@ Actions 에서도 켜진다 — 과금이 아니라 구독 사용량. 없으면 
 """
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import logging
 import time
@@ -78,6 +79,14 @@ async def run_tick(settings, budget_s: float = 540) -> dict:
         ctx = _Job(app, bot)
         s = settings.get
         now = time.time()
+        # 강회장 2026-10-22 "5분 간격 개오바" → 스캔은 1시간에 한 번. 그보다 자주 깨워도 명령만 처리하고 끝
+        gap = float(s("schedule.tick_min_gap_minutes", 55)) * 60
+        last_scan = store.job_last("scan_tick")
+        if last_scan is not None and now - last_scan < gap:
+            await radar.P.close()
+            log.info("tick 끝 — 마지막 스캔 %.0f분 전, 건너뜀", (now - last_scan) / 60)
+            return {"done": done or ["건너뜀"], "took": round(time.time() - t0, 1)}
+        store.job_mark("scan_tick", now)
         # 첫 실행(깃허브 캐시가 비어 있음) — 오늘치 하루 1회 작업은 '이미 함'으로 두고 시작한다.
         # 안 그러면 옮기는 순간 오전·오후 브리핑·언락이 한꺼번에 나간다.
         if store.job_last("initialized") is None:
@@ -105,8 +114,12 @@ async def run_tick(settings, budget_s: float = 540) -> dict:
                 log.info("시간 예산 소진 — %s 는 다음 실행으로", name)
                 break
             try:
-                await fn(ctx)
+                # 작업 하나가 남은 예산을 넘기면 끊는다 — 안 그러면 워크플로 시간초과로 잘려 DB 저장까지 실패한다
+                await asyncio.wait_for(fn(ctx), max(30.0, budget_s - (time.time() - t0)))
                 done.append(name)
+            except asyncio.TimeoutError:
+                log.warning("%s 시간초과 — 다음 실행으로", name)
+                done.append(f"{name}(시간초과)")
             except Exception as e:  # noqa: BLE001
                 log.exception("%s 실패", name)
                 done.append(f"{name}(실패: {type(e).__name__})")

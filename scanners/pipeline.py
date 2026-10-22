@@ -8,6 +8,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
@@ -65,10 +66,18 @@ def make_providers(settings) -> Providers:
                      Tokenomist(settings), Nansen(settings), stage6_news.NewsFeeds(settings))
 
 
+STAGE_TIMEOUT_S = 150   # 한 단계가 이보다 오래 걸리면 건너뛴다
+
+
 async def _guard(name: str, res: ScanResult, coro):
-    """Stage 예외 격리 — 실패는 기록하고 None 을 돌려준다."""
+    """Stage 예외 격리 — 실패는 기록하고 None 을 돌려준다.
+    2026-10-12~22 깃허브에서 한 단계가 말없이 14분을 붙잡아 실행이 전부 잘렸다 → 단계마다 시간 상한."""
     try:
-        return await coro
+        return await asyncio.wait_for(coro, STAGE_TIMEOUT_S)
+    except asyncio.TimeoutError:
+        log.warning("%s 시간초과(%ds) — 건너뜀", name, STAGE_TIMEOUT_S)
+        res.errors.append(f"{name}: 시간초과")
+        return None
     except Exception as e:  # noqa: BLE001
         log.exception("%s 실패", name)
         res.errors.append(f"{name}: {type(e).__name__}: {e}")
